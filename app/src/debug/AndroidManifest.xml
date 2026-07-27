@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Opening a socket needs INTERNET, even to bind 127.0.0.1. Without it the probe dies with
+      "SocketException: Operation not permitted".
+
+      It lives in the DEBUG manifest on purpose, so the release build never asks for it.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+</manifest>

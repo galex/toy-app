@@ -1,0 +1,23 @@
+name: open a toy
+port: 4242
+steps:
+  # We start on the list.
+  - assert_id: toys_title
+  - assert_text: "Wooden Train"
+  - screenshot: 01-toy-list.png
+
+  # Open the third toy. The id carries its row index, so this can never hit the wrong card.
+  - tap_id: toys_index_2_card
+
+  # Assert on the breadcrumb rather than on the copy: a translation would break the copy.
+  - assert_breadcrumb: "ToyDetail(building-blocks)"
+  - assert_id: toy_detail_name
+  - assert_text: "Building Blocks"
+  - assert_text: "Construction"
+  - screenshot: 02-toy-detail.png
+
+  # And back, which proves the navigation actually popped rather than stacking another screen.
+  - tap_id: toy_detail_back_button
+  - assert_breadcrumb: "Toys"
+  - assert_no_text: "under the sofa"
+  - screenshot: 03-back-on-list.png

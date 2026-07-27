@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""run-flow — run a YAML flow against the running app.
+
+The steps an agent just performed by hand ARE a regression test, so we write them down. This runner
+replays them through the probe HTTP server and exits non-zero on the first failure, which is what
+makes it usable as a CI gate.
+
+  probe/scripts/run-flow probe/flows/open-a-toy.yaml
+  probe/scripts/run-flow probe/flows/open-a-toy.yaml --screenshot-every-step
+  probe/scripts/run-flow probe/flows/open-a-toy.yaml --junit-xml out/junit.xml
+
+There is deliberately no `sleep` step. Every assertion polls instead, because a sleep that is long
+enough today is a flake on a slower machine tomorrow.
+
+Uses PyYAML when it happens to be installed, and otherwise a built-in parser that handles the
+subset below, so the zero-install promise holds.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from probe_client import DEFAULT_PORT, ProbeClient, ProbeError  # noqa: E402
+
+# Assertions poll for up to this long, so a step that changes state (navigation, recomposition) can
+# settle before we check it.
+ASSERT_TIMEOUT_S = 4.0
+ASSERT_POLL_S = 0.15
+
+
+# --------------------------------------------------------------------------- parsing
+
+def load_flow(path: str) -> dict:
+    with open(path) as f:
+        text = f.read()
+    # ${VAR} expansion happens over the raw text, so secrets live in the environment, not in git.
+    text = os.path.expandvars(text)
+    try:
+        import yaml  # type: ignore
+        return yaml.safe_load(text) or {}
+    except ImportError:
+        return _minimal_parse(text)
+
+
+def _coerce(value: str):
+    v = value.strip()
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        return v[1:-1]
+    low = v.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low in ("null", "~", ""):
+        return None
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    return v
+
+
+def _parse_inline_map(s: str) -> dict:
+    s = s.strip().lstrip("{").rstrip("}").strip()
+    out = {}
+    if not s:
+        return out
+    for pair in s.split(","):
+        if ":" not in pair:
+            continue
+        k, val = pair.split(":", 1)
+        out[k.strip()] = _coerce(val)
+    return out
+
+
+def _strip_inline_comment(s: str) -> str:
+    """Drop a trailing ` # ...` comment when it isn't inside quotes."""
+    in_single = in_double = False
+    for i, c in enumerate(s):
+        if c == "'" and not in_double:
+            in_single = not in_single
+        elif c == '"' and not in_single:
+            in_double = not in_double
+        elif c == "#" and not in_single and not in_double and (i == 0 or s[i - 1] in " \t"):
+            return s[:i].rstrip()
+    return s
+
+
+def _minimal_parse(text: str) -> dict:
+    """A tiny parser for the flow subset, so PyYAML stays optional."""
+    flow: dict = {}
+    steps: list = []
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    i = 0
+    in_steps = False
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        indent = len(raw) - len(raw.lstrip())
+
+        if not in_steps and stripped == "steps:":
+            in_steps = True
+            i += 1
+            continue
+
+        if in_steps and stripped.startswith("- "):
+            item = _strip_inline_comment(stripped[2:].strip())
+            if ":" not in item:
+                steps.append(_coerce(item))  # a bare step, e.g. "- press_back"
+                i += 1
+                continue
+            key, _, rest = item.partition(":")
+            key = key.strip()
+            rest = rest.strip()
+            if rest.startswith("{"):
+                steps.append({key: _parse_inline_map(rest)})
+                i += 1
+            elif rest:
+                steps.append({key: _coerce(rest)})
+                i += 1
+            else:
+                block = {}
+                i += 1
+                while i < len(lines):
+                    nxt = lines[i]
+                    if not nxt.strip() or nxt.strip().startswith("#"):
+                        i += 1
+                        continue
+                    nxt_indent = len(nxt) - len(nxt.lstrip())
+                    if nxt_indent <= indent or nxt.strip().startswith("- "):
+                        break
+                    bk, _, bv = nxt.strip().partition(":")
+                    block[bk.strip()] = _coerce(bv)
+                    i += 1
+                steps.append({key: block})
+            continue
+
+        if not in_steps and ":" in stripped:
+            k, _, v = stripped.partition(":")
+            flow[k.strip()] = _coerce(v)
+        i += 1
+
+    flow["steps"] = steps
+    return flow
+
+
+# --------------------------------------------------------------------------- running
+
+def _bare_id(raw: str) -> str:
+    """Strip the "<pkg>:id/" prefix, so a flow matches on the bare automation id."""
+    return raw.rsplit(":id/", 1)[-1] if raw else ""
+
+
+def _id_arg(arg) -> tuple[str, float]:
+    """An id step takes either a bare id, or {id: ..., timeout: <seconds>}."""
+    if isinstance(arg, dict):
+        return str(arg["id"]), float(arg.get("timeout", ASSERT_TIMEOUT_S))
+    return str(arg), ASSERT_TIMEOUT_S
+
+
+def _snapshot(client: ProbeClient) -> tuple[list, list, str]:
+    snap = client.ui_snapshot()
+    elements = snap.get("elements", [])
+    texts = [e.get("text") or "" for e in elements]
+    ids = [e.get("id") or "" for e in elements]
+    return texts, ids, snap.get("breadcrumb", "")
+
+
+def _poll_assert(check, timeout_s: float = ASSERT_TIMEOUT_S) -> str:
+    """Poll `check` until it passes or the deadline expires.
+
+    A transient ProbeError from the snapshot, for example while Compose is mid-recomposition after a
+    navigation, means "not satisfied yet" and is retried. A naive runner would report a failure
+    here, and this is the single decision that separates a suite people trust from one they mute.
+    """
+    deadline = time.monotonic() + timeout_s
+
+    def attempt():
+        try:
+            return check()
+        except ProbeError as e:
+            return False, f"snapshot unavailable, retrying: {e}"
+
+    ok, msg = attempt()
+    while not ok and time.monotonic() < deadline:
+        time.sleep(ASSERT_POLL_S)
+        ok, msg = attempt()
+    if ok:
+        return msg
+    raise AssertionError(msg)
+
+
+def _find_by_id(client: ProbeClient, target: str) -> dict | None:
+    want = _bare_id(str(target))
+    try:
+        elements = client.ui_snapshot().get("elements", [])
+    except ProbeError:
+        return None  # mid-recomposition, the caller's poll will retry
+    for element in elements:
+        if _bare_id(element.get("id") or "") == want:
+            return element
+    return None
+
+
+def _norm_swipe(m: dict) -> dict:
+    def pick(*names, default=None):
+        for n in names:
+            if n in m:
+                return m[n]
+        return default
+
+    return dict(
+        start_x=pick("startX", "start_x"),
+        start_y=pick("startY", "start_y"),
+        end_x=pick("endX", "end_x"),
+        end_y=pick("endY", "end_y"),
+        duration_ms=pick("durationMs", "duration_ms", default=300),
+    )
+
+
+def run_step(client: ProbeClient, step, artifacts: str, idx: int) -> str:
+    if isinstance(step, str):
+        name, arg = step, None
+    elif isinstance(step, dict) and len(step) == 1:
+        name, arg = next(iter(step.items()))
+    else:
+        raise ValueError(f"step {idx}: expected a bare string or a single-key mapping, got {step!r}")
+
+    if name == "tap":
+        client.tap(arg["x"], arg["y"])
+        return f"tap ({arg['x']},{arg['y']})"
+
+    if name == "tap_id":
+        # Poll for the target, so it can appear after a navigation before we tap it.
+        target, timeout_s = _id_arg(arg)
+        deadline = time.monotonic() + timeout_s
+        element = _find_by_id(client, target)
+        while element is None and time.monotonic() < deadline:
+            time.sleep(ASSERT_POLL_S)
+            element = _find_by_id(client, target)
+        if element is None:
+            raise AssertionError(f"tap_id {target!r}: no element with this id on screen")
+        cx = element["x"] + element.get("width", 0) / 2
+        cy = element["y"] + element.get("height", 0) / 2
+        client.tap(cx, cy)
+        return f"tap_id {target!r} -> ({cx:.0f},{cy:.0f})"
+
+    if name == "swipe":
+        client.swipe(**_norm_swipe(arg))
+        return "swipe"
+
+    if name == "input_text":
+        client.input_text(arg)
+        return f"input_text {arg!r}"
+
+    if name == "press_back":
+        client.press_back()
+        return "press_back"
+
+    if name == "screenshot":
+        out = os.path.join(artifacts, str(arg)) if arg else os.path.join(artifacts, f"step-{idx}.png")
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(client.screenshot())
+        return f"screenshot -> {out}"
+
+    if name == "assert_text":
+        def check():
+            texts, _ids, crumb = _snapshot(client)
+            ok = any(str(arg) in t for t in texts) or str(arg) in crumb
+            return ok, (f"assert_text {arg!r} ok" if ok else f"assert_text {arg!r}: not on screen")
+        return _poll_assert(check)
+
+    if name == "assert_no_text":
+        def check():
+            texts, _ids, crumb = _snapshot(client)
+            ok = not any(str(arg) in t for t in texts) and str(arg) not in crumb
+            return ok, (f"assert_no_text {arg!r} ok" if ok else f"assert_no_text {arg!r}: still present")
+        return _poll_assert(check)
+
+    if name == "assert_id":
+        target, timeout_s = _id_arg(arg)
+        want = _bare_id(target)
+
+        def check():
+            _texts, ids, _crumb = _snapshot(client)
+            ok = any(_bare_id(i) == want for i in ids)
+            return ok, (f"assert_id {target!r} ok" if ok else f"assert_id {target!r}: not on screen")
+        return _poll_assert(check, timeout_s)
+
+    if name == "assert_no_id":
+        target, timeout_s = _id_arg(arg)
+        want = _bare_id(target)
+
+        def check():
+            _texts, ids, _crumb = _snapshot(client)
+            ok = not any(_bare_id(i) == want for i in ids)
+            return ok, (f"assert_no_id {target!r} ok" if ok else f"assert_no_id {target!r}: still present")
+        return _poll_assert(check, timeout_s)
+
+    if name == "assert_breadcrumb":
+        def check():
+            _texts, _ids, crumb = _snapshot(client)
+            ok = str(arg) in crumb
+            return ok, (
+                f"assert_breadcrumb {arg!r} ok (at {crumb!r})"
+                if ok else f"assert_breadcrumb {arg!r}: we are at {crumb!r}"
+            )
+        return _poll_assert(check)
+
+    raise ValueError(f"step {idx}: unknown step '{name}'")
+
+
+# --------------------------------------------------------------------------- reporting
+
+def _slug(s: str) -> str:
+    return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(s)).strip("_") or "flow"
+
+
+def _xml_escape(s: str) -> str:
+    return (
+        str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+def write_junit(path: str, suite: str, cases: list) -> None:
+    """One <testcase> per step, hand-written, because a dev tool doesn't need a test framework."""
+    failures = sum(1 for c in cases if not c["ok"])
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>']
+    lines.append(f'<testsuite name="{_xml_escape(suite)}" tests="{len(cases)}" failures="{failures}">')
+    for c in cases:
+        lines.append(f'  <testcase name="{_xml_escape(c["name"])}">')
+        if not c["ok"]:
+            lines.append(
+                f'    <failure message="{_xml_escape(c.get("failure", ""))}">'
+                f'{_xml_escape(c.get("detail", ""))}</failure>'
+            )
+        lines.append("  </testcase>")
+    lines.append("</testsuite>")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="run-flow", description="Run a probe YAML flow against the app.")
+    p.add_argument("flow", help="path to the YAML flow file")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int)
+    p.add_argument("--timeout", type=float, default=15.0)
+    p.add_argument("--artifacts", default="probe-artifacts", help="where screenshots are written")
+    p.add_argument("--junit-xml", dest="junit_xml", help="also write a JUnit report here")
+    p.add_argument(
+        "--screenshot-every-step",
+        dest="shot_every_step",
+        action="store_true",
+        help="capture a screenshot after every step, for a frame by frame record of the run",
+    )
+    args = p.parse_args(argv)
+
+    flow = load_flow(args.flow)
+    steps = flow.get("steps") or []
+    name = flow.get("name", os.path.basename(args.flow))
+    slug = _slug(name)
+    port = args.port or int(flow.get("port") or DEFAULT_PORT)
+    os.makedirs(args.artifacts, exist_ok=True)
+    shots_dir = os.path.join(args.artifacts, slug)
+    if args.shot_every_step:
+        os.makedirs(shots_dir, exist_ok=True)
+    client = ProbeClient(host=args.host, port=port, timeout=args.timeout)
+
+    started = time.monotonic()
+    print(f"flow '{name}': {len(steps)} step(s) against {client.base}")
+    cases: list = []
+    exit_code = 0
+    for idx, step in enumerate(steps):
+        label = step if isinstance(step, str) else next(iter(step))
+        case_name = f"[{idx}] {label}"
+        try:
+            step_started = time.monotonic()
+            detail = run_step(client, step, args.artifacts, idx)
+            elapsed = (time.monotonic() - step_started) * 1000
+            print(f"  ok   [{idx}] {detail}  ({elapsed:.0f}ms)")
+            cases.append({"name": case_name, "ok": True, "detail": detail})
+            if args.shot_every_step:
+                shot = os.path.join(shots_dir, f"{idx:02d}-{_slug(label)}.png")
+                try:
+                    with open(shot, "wb") as f:
+                        f.write(client.screenshot())
+                except ProbeError as se:
+                    print(f"       (could not capture step screenshot: {se})", file=sys.stderr)
+        except (AssertionError, ProbeError, KeyError, ValueError) as e:
+            print(f"  FAIL [{idx}] {e}", file=sys.stderr)
+            cases.append({"name": case_name, "ok": False, "failure": str(e), "detail": repr(step)})
+            shot = os.path.join(args.artifacts, f"{slug}-failure.png")
+            try:
+                with open(shot, "wb") as f:
+                    f.write(client.screenshot())
+                print(f"       captured failure screenshot: {shot}", file=sys.stderr)
+            except ProbeError as se:
+                print(f"       (could not capture failure screenshot: {se})", file=sys.stderr)
+            exit_code = 1
+            break
+
+    total = time.monotonic() - started
+    if args.junit_xml:
+        write_junit(args.junit_xml, name, cases)
+        print(f"  JUnit report: {args.junit_xml}")
+    if exit_code == 0:
+        print(f"flow '{name}' passed in {total:.1f}s")
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
