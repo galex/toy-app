@@ -4,3 +4,5 @@ build/
 *.iml
 .idea/
 probe-artifacts/
+__pycache__/
+*.pyc
