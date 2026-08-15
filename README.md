@@ -11,8 +11,12 @@ app/              two Compose screens and a six-item list of toys
 automation-ids/   Modifier.automationId, so every element has a stable, unique id
 probe-server/     a debug-only HTTP server inside the app, reading Compose's semantics tree
 probe/scripts/    the CLI an agent drives, and the YAML flow runner (standard-library Python 3)
-probe/flows/      one flow: open the list, open a toy, come back
+probe/flows/      open the list, open a toy, come back, with and without the navigation map
 ```
+
+> **This branch, `post/navigation-map`,** adds the navigation map: the app declares every screen,
+> its ids and its exits in Kotlin, the probe serves them on `GET /nav_map`, and the CLI walks them,
+> so an agent stops rediscovering the app on every edit. See **Navigating without looking** below.
 
 ## Run the demo
 
@@ -70,6 +74,53 @@ makes it certain:
   "clickable": true
 }
 ```
+
+## Navigating without looking
+
+Dumping the whole UI is the right way to ask "what is on this screen", and the wrong way to ask
+"where is that screen and how do I get there". The second question has a fixed answer, so the app
+writes it down once, in `app/src/debug/kotlin/dev/galex/toyapp/AppNavigationMap.kt`, and the probe
+serves it:
+
+```bash
+probe/scripts/probe nav-map                    # every screen, its ids, its exits
+probe/scripts/probe owner-of toy_detail_name   # which screen owns this id?
+probe/scripts/probe goto toy_detail --index 2  # walk there, checking the breadcrumb at each hop
+```
+
+```
+goto 'toy_detail': 1 hop(s) from 'Toys'
+  ok   tap_id 'toys_index_2_card' -> (640,948)
+  ok   arrived at 'Toys > ToyDetail(building-blocks)'
+```
+
+The ids in the map are not strings written a second time. They come from the same `ToysIds` and
+`ToyDetailIds` constants the composables pass to `Modifier.automationId`, so renaming one breaks the
+build instead of quietly sending the agent to a tap that lands nowhere.
+
+What the compiler cannot check is the arrows: nothing stops us from declaring that a tap leads to a
+screen it doesn't. So the runner walks every edge of the map on a real device, which is what belongs
+in CI after any navigation change:
+
+```
+$ probe/scripts/run-flow --from-map --index 3
+flow 'navigation map': 6 step(s) against http://127.0.0.1:4242
+  ok   [0] goto 'toys' -> 0 hop(s), at 'Toys'  (17ms)
+  ok   [1] tap_id 'toys_index_3_card' -> (640,1224)  (10ms)
+  ok   [2] assert_breadcrumb 'ToyDetail' ok (at 'Toys > ToyDetail(spinning-top)')  (166ms)
+  ok   [3] goto 'toy_detail' -> 0 hop(s), at 'Toys > ToyDetail(spinning-top)'  (14ms)
+  ok   [4] tap_id 'toy_detail_back_button' -> (262,588)  (9ms)
+  ok   [5] assert_breadcrumb 'Toys' ok (at 'Toys')  (167ms)
+flow 'navigation map' passed in 0.4s
+```
+
+A flow can say where it wants to be instead of spelling out the taps that get there, which is what
+`probe/flows/open-a-toy-with-goto.yaml` does. Insert a screen in the middle of that path tomorrow,
+and the flow still passes.
+
+`.claude/skills/app-navigation/SKILL.md` is what makes an agent reach for all of this without being
+asked. It lives in a skill rather than in `CLAUDE.md` because `CLAUDE.md` is loaded on every turn,
+including the many that never touch the UI.
 
 ## How it works
 

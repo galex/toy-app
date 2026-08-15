@@ -84,6 +84,19 @@ fun Routing.registerProbeRoutes(context: ToolContext) {
         )
     }
 
+    get("/nav_map") {
+        val map = context.hooks.navigationMap()
+        if (map == null) {
+            call.respondError(
+                HttpStatusCode.NotFound,
+                "this app declared no navigation map. Pass ProbeHooks(navigationMap = { ... }) " +
+                    "when calling startProbe, then use /ui_snapshot to find your way around.",
+            )
+        } else {
+            call.respondJson(map.toJson())
+        }
+    }
+
     get("/screenshot") {
         runCatching { context.driver.screenshot() }.fold(
             onSuccess = { call.respondBytes(it, ContentType.Image.PNG) },

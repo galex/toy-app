@@ -1,0 +1,24 @@
+name: open a toy, by asking the map
+port: 4242
+steps:
+  # The same journey as open-a-toy.yaml, except that nothing here spells out the way there. Insert
+  # a screen between the list and the detail tomorrow, and this flow still passes.
+  - goto: toys
+  - assert_id: toys_title
+  - assert_text: "Wooden Train"
+  - screenshot: 01-toy-list.png
+
+  # The map says toy_detail is reached by tapping a card, and index 2 is the third one.
+  - goto:
+      screen: toy_detail
+      index: 2
+  - assert_breadcrumb: "ToyDetail(building-blocks)"
+  - assert_id: toy_detail_name
+  - assert_text: "Building Blocks"
+  - screenshot: 02-toy-detail.png
+
+  # And back, which proves the navigation popped rather than stacking another screen.
+  - tap_id: toy_detail_back_button
+  - assert_breadcrumb: "Toys"
+  - assert_no_text: "under the sofa"
+  - screenshot: 03-back-on-list.png

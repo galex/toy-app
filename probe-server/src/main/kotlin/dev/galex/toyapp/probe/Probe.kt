@@ -25,9 +25,13 @@ data class ProbeConfig(
  *
  * [breadcrumb] tells us where we are ("Toys > ToyDetail"), which is what a flow should assert on:
  * it survives a translation, while visible copy does not.
+ *
+ * [navigationMap] hands over every screen of the app, the ids it owns and the taps that lead out of
+ * it, so the CLI can route to a screen instead of making the agent discover the way there.
  */
 class ProbeHooks(
     val breadcrumb: () -> String = { "" },
+    val navigationMap: () -> NavigationMap? = { null },
 )
 
 /** One visible thing on screen, with the bounds a tap can aim at. */

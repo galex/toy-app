@@ -25,19 +25,19 @@ import dev.galex.toyapp.data.toys
 @Composable
 fun ToyListScreen(onToyClick: (Toy) -> Unit) {
     // Everything below this scope gets ids starting with "toys_".
-    AutomationContext("toys") {
+    AutomationContext(ToysIds.Context) {
         Column(modifier = Modifier.fillMaxSize()) {
             Text(
                 text = "Toys",
                 style = MaterialTheme.typography.headlineMedium,
                 modifier = Modifier
                     .padding(24.dp)
-                    .automationId("title"),
+                    .automationId(ToysIds.TitleSegment),
             )
             LazyColumn(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.automationId("list"),
+                modifier = Modifier.automationId(ToysIds.ListSegment),
             ) {
                 itemsIndexed(toys) { index, toy ->
                     // The index scope is what stops six rows from sharing one id.
@@ -56,7 +56,7 @@ private fun ToyCard(toy: Toy, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .automationId("card"),
+            .automationId(ToysIds.CardSegment),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -65,12 +65,12 @@ private fun ToyCard(toy: Toy, onClick: () -> Unit) {
             Text(
                 text = toy.name,
                 style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.automationId("name"),
+                modifier = Modifier.automationId(ToysIds.NameSegment),
             )
             Text(
                 text = "${toy.category} · ages ${toy.ageRange}",
                 style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.automationId("subtitle"),
+                modifier = Modifier.automationId(ToysIds.SubtitleSegment),
             )
         }
     }

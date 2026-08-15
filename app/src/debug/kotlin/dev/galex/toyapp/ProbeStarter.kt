@@ -19,6 +19,9 @@ fun Application.startProbeIfDebug() {
             packageName = BuildConfig.APPLICATION_ID,
             port = 4242,
         ),
-        hooks = ProbeHooks(breadcrumb = { NavBridge.breadcrumb }),
+        hooks = ProbeHooks(
+            breadcrumb = { NavBridge.breadcrumb },
+            navigationMap = { AppNavigationMap },
+        ),
     )
 }
