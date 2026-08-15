@@ -14,9 +14,10 @@ probe/scripts/    the CLI an agent drives, and the YAML flow runner (standard-li
 probe/flows/      open the list, open a toy, come back, with and without the navigation map
 ```
 
-> **This branch, `post/navigation-map`,** adds the navigation map: the app declares every screen,
-> its ids and its exits in Kotlin, the probe serves them on `GET /nav_map`, and the CLI walks them,
-> so an agent stops rediscovering the app on every edit. See **Navigating without looking** below.
+> The app also declares every screen, its ids and its exits in Kotlin, the probe serves them on
+> `GET /nav_map`, and the CLI walks them, so an agent stops rediscovering the app on every edit.
+> See **Navigating without looking** below. The `post/navigation-map` branch is kept as the
+> snapshot of that change on its own.
 
 ## Run the demo
 
