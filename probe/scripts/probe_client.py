@@ -65,6 +65,10 @@ class ProbeClient:
     def ui_snapshot(self) -> dict:
         return self._json("GET", "/ui_snapshot")
 
+    def nav_map(self) -> dict:
+        """Every screen of the app, its ids and its exits, as the app itself declares them."""
+        return self._json("GET", "/nav_map")
+
     def logs(self) -> dict:
         return self._json("GET", "/logs")
 

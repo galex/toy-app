@@ -19,6 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import nav_map  # noqa: E402
 from probe_client import DEFAULT_PORT, ProbeClient, ProbeError  # noqa: E402
 
 
@@ -35,6 +36,17 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("app-info", help="app name, version, package, port")
     sub.add_parser("ui-snapshot", help="ids, text, bounds of everything on screen")
+    sub.add_parser("nav-map", help="every screen of the app, its ids and its exits")
+
+    goto = sub.add_parser("goto", help="walk the navigation map to a screen, and land on it")
+    goto.add_argument("screen", help="the id of a screen in the map, e.g. toy_detail")
+    goto.add_argument(
+        "--index",
+        help="fills the {index} placeholder of a list row, e.g. --index 2 taps the third card",
+    )
+
+    owner = sub.add_parser("owner-of", help="which screen owns this automation id")
+    owner.add_argument("id")
     sub.add_parser("logs", help="the last log lines the app emitted")
     sub.add_parser("press-back", help="press the platform back button")
 
@@ -88,6 +100,27 @@ def main(argv=None) -> int:
             _out(client.swipe(args.start_x, args.start_y, args.end_x, args.end_y, args.duration_ms))
         elif args.command == "input-text":
             _out(client.input_text(args.text))
+        elif args.command == "nav-map":
+            _out(client.nav_map())
+        elif args.command == "goto":
+            params = {"index": args.index} if args.index is not None else {}
+            # Progress goes to stderr as it happens, so a long walk is readable while it runs and
+            # stdout still holds nothing but the JSON result.
+            arrival = nav_map.goto(
+                client,
+                args.screen,
+                params,
+                on_step=lambda line: print(line, file=sys.stderr),
+            )
+            _out({"ok": True, **arrival})
+        elif args.command == "owner-of":
+            screen = nav_map.owner_of(client.nav_map(), args.id)
+            if screen is None:
+                raise ProbeError(
+                    f"no screen in the map owns {args.id!r}. Add it to the Screen's ids, or check "
+                    f"the spelling against probe nav-map."
+                )
+            _out(screen)
     except ProbeError as e:
         print(json.dumps({"ok": False, "error": str(e)}, indent=2), file=sys.stderr)
         return 1

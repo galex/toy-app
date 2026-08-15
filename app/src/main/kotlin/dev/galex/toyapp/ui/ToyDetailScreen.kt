@@ -18,7 +18,7 @@ import dev.galex.toyapp.data.toys
 
 @Composable
 fun ToyDetailScreen(toy: Toy?, onBack: () -> Unit) {
-    AutomationContext("toy_detail") {
+    AutomationContext(ToyDetailIds.Context) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -28,23 +28,23 @@ fun ToyDetailScreen(toy: Toy?, onBack: () -> Unit) {
             Text(
                 text = toy?.name ?: "Unknown toy",
                 style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.automationId("name"),
+                modifier = Modifier.automationId(ToyDetailIds.NameSegment),
             )
             if (toy != null) {
                 Text(
                     text = "${toy.category} · ages ${toy.ageRange} · ${toy.pieces} piece(s)",
                     style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.automationId("meta"),
+                    modifier = Modifier.automationId(ToyDetailIds.MetaSegment),
                 )
                 Text(
                     text = toy.description,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.automationId("description"),
+                    modifier = Modifier.automationId(ToyDetailIds.DescriptionSegment),
                 )
             }
             Button(
                 onClick = onBack,
-                modifier = Modifier.automationId("back_button"),
+                modifier = Modifier.automationId(ToyDetailIds.BackButtonSegment),
             ) {
                 Text("Back to toys")
             }

@@ -24,6 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import nav_map  # noqa: E402
 from probe_client import DEFAULT_PORT, ProbeClient, ProbeError  # noqa: E402
 
 # Assertions poll for up to this long, so a step that changes state (navigation, recomposition) can
@@ -162,6 +163,18 @@ def _id_arg(arg) -> tuple[str, float]:
     if isinstance(arg, dict):
         return str(arg["id"]), float(arg.get("timeout", ASSERT_TIMEOUT_S))
     return str(arg), ASSERT_TIMEOUT_S
+
+
+def _goto_arg(arg) -> tuple[str, dict]:
+    """A goto step takes either a bare screen id, or {screen: ..., index: 2, ...}.
+
+    Every key other than `screen` fills a `{placeholder}` in the ids the map declares, which is how
+    one map entry covers all six rows of a list.
+    """
+    if isinstance(arg, dict):
+        params = {k: v for k, v in arg.items() if k != "screen"}
+        return str(arg["screen"]), params
+    return str(arg), {}
 
 
 def _snapshot(client: ProbeClient) -> tuple[list, list, str]:
@@ -304,10 +317,22 @@ def run_step(client: ProbeClient, step, artifacts: str, idx: int) -> str:
             return ok, (f"assert_no_id {target!r} ok" if ok else f"assert_no_id {target!r}: still present")
         return _poll_assert(check, timeout_s)
 
+    if name == "goto":
+        # The map knows the way, so a flow says where it wants to be instead of spelling out the
+        # taps that get there. Add a screen in the middle later, and this step still works.
+        target, params = _goto_arg(arg)
+        arrival = nav_map.goto(client, target, params)
+        return (
+            f"goto {target!r} -> {arrival['hops']} hop(s), at {arrival['breadcrumb']!r}"
+        )
+
     if name == "assert_breadcrumb":
         def check():
             _texts, _ids, crumb = _snapshot(client)
-            ok = str(arg) in crumb
+            # Match the LAST part of the trail, never the whole of it. "Toys" inside
+            # "Toys > ToyDetail(rubber-duck)" would otherwise pass while we are still one screen
+            # deeper, which is a green step for a navigation that never happened.
+            ok = str(arg) in nav_map.leaf(crumb)
             return ok, (
                 f"assert_breadcrumb {arg!r} ok (at {crumb!r})"
                 if ok else f"assert_breadcrumb {arg!r}: we are at {crumb!r}"
@@ -348,9 +373,44 @@ def write_junit(path: str, suite: str, cases: list) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def flow_from_map(client: ProbeClient, index: str = "0") -> dict:
+    """Build a flow that walks every edge the navigation map declares.
+
+    The compiler already checks that the map's ids exist, since it is built from the same constants
+    the screens use. What no compiler can check is the arrows: nothing stops us from claiming that a
+    tap leads somewhere it doesn't. So we go and try every one of them, on a real device.
+    """
+    the_map = nav_map.load_map(client)
+    steps: list = []
+    for edge in nav_map.edges(the_map):
+        source = nav_map.screen(the_map, edge["fromScreen"])
+        destination = nav_map.screen(the_map, edge["leadsTo"])
+        steps.append({"goto": {"screen": source["id"], "index": index}})
+        steps.append({"tap_id": nav_map.resolve(edge["tapId"], {"index": index})})
+        steps.append({"assert_breadcrumb": _breadcrumb_prefix(destination["breadcrumb"])})
+    return {"name": "navigation map", "steps": steps}
+
+
+def _breadcrumb_prefix(breadcrumb: str) -> str:
+    """The part of a breadcrumb before its first placeholder, which is what we can assert on."""
+    head = breadcrumb.split("{", 1)[0].rstrip("( ")
+    return head or breadcrumb
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="run-flow", description="Run a probe YAML flow against the app.")
-    p.add_argument("flow", help="path to the YAML flow file")
+    p.add_argument("flow", nargs="?", help="path to the YAML flow file")
+    p.add_argument(
+        "--from-map",
+        dest="from_map",
+        action="store_true",
+        help="walk every edge of the app's navigation map instead of reading a flow file",
+    )
+    p.add_argument(
+        "--index",
+        default="0",
+        help="value for the {index} placeholder while walking the map (default: 0)",
+    )
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int)
     p.add_argument("--timeout", type=float, default=15.0)
@@ -363,10 +423,19 @@ def main(argv=None) -> int:
         help="capture a screenshot after every step, for a frame by frame record of the run",
     )
     args = p.parse_args(argv)
+    if not args.flow and not args.from_map:
+        p.error("give me a flow file, or --from-map to walk the navigation map")
 
-    flow = load_flow(args.flow)
+    if args.from_map:
+        probe_port = args.port or DEFAULT_PORT
+        flow = flow_from_map(
+            ProbeClient(host=args.host, port=probe_port, timeout=args.timeout),
+            index=args.index,
+        )
+    else:
+        flow = load_flow(args.flow)
     steps = flow.get("steps") or []
-    name = flow.get("name", os.path.basename(args.flow))
+    name = flow.get("name", os.path.basename(args.flow or "nav-map"))
     slug = _slug(name)
     port = args.port or int(flow.get("port") or DEFAULT_PORT)
     os.makedirs(args.artifacts, exist_ok=True)
