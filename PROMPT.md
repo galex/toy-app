@@ -1,7 +1,9 @@
 # The probe prompt
 
 This is the full prompt behind [How to Make Our Coding Agent Fully
-Independent](https://galex.dev/posts/how-to-make-your-coding-agent-fully-independent/).
+Independent](https://galex.dev/posts/how-to-make-your-coding-agent-fully-independent/), and its
+Phase 7 comes from [How to Give Our Coding Agent a Map of the
+App](https://galex.dev/posts/how-to-give-our-coding-agent-a-map-of-the-app/).
 Hand it to a coding agent in your own project and it will build the probe described in this
 repository: a debug-only HTTP server inside the app, and a CLI on top of it.
 
@@ -215,9 +217,37 @@ Add this to CLAUDE.md (or your equivalent), so you reach for it without being as
     - Never tap coordinates you didn't just read from a snapshot
     - If you can't reach the probe, run forward.sh once, then say so, don't guess
 
+## Phase 7: a map, so you stop rediscovering the app
+
+A snapshot answers "what is on this screen". It is the wrong tool for "where is that screen and how
+do I get there", and you were paying for a full UI dump every time you asked that. The second answer
+never changes, so let the app declare it once:
+
+- In the probe module: `NavigationMap(screens)`, `Screen(id, breadcrumb, entry, ids, actions)` and
+  `Action(tapId, leadsTo)`. Plain data classes, serialized by hand like every other payload here.
+- The app's own map is ONE static object in the `src/debug` source set, handed to the probe through
+  a hook next to the breadcrumb one. There is no navigation map in a release build.
+- The ids in it MUST come from the same constants the composables pass to `Modifier.automationId`.
+  If those are string literals today, extract them into a `<Screen>Ids` object first. This is the
+  whole point of the map being code: renaming an id then breaks the build, instead of quietly
+  sending you to a tap that lands nowhere.
+- Breadcrumbs carry `{placeholders}` for the parts that depend on data, so a check matches the shape
+  of a screen and not one row of it.
+- Serve it on GET /nav_map, and add `nav-map`, `owner-of <id>` and `goto <screen>` to the CLI, where
+  goto searches the `leadsTo` graph from the screen you are ON, taps its way there, and checks the
+  breadcrumb at every hop. Match the LAST part of the breadcrumb trail, never anywhere inside it, or
+  "Toys" passes while you are still on "Toys > ToyDetail(...)".
+- Add a `goto` step to the flow runner, and a `--from-map` mode that walks every edge on a device.
+  The compiler checks the ids, only a device checks the arrows.
+
+Then put the rules in a SKILL (`.claude/skills/app-navigation/SKILL.md`) rather than in CLAUDE.md,
+which is loaded on every single turn including the many that never touch the UI: read the map before
+any tap, and update the map in the same edit that changes the navigation.
+
 ## Definition of done
 
 From a fresh clone: install a debug build, run forward.sh, and drive a full screen end to end with
 the CLI alone. `probe ui-snapshot` returns real ids with real bounds, `probe tap` lands on the
-element those bounds describe, one YAML flow passes, and no release variant contains a single line
-of probe code.
+element those bounds describe, `probe nav-map` returns every screen with its real ids and
+`probe goto <screen>` arrives on it, one YAML flow passes, and no release variant contains a single
+line of probe code.
