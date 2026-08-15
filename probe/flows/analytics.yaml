@@ -1,0 +1,43 @@
+name: opening a toy fires exactly one event
+port: 4242
+steps:
+  # Start from a known state, because launching the app already fired a few events.
+  - goto: toys
+  - clear_events
+
+  # One open, one event, carrying the id of the toy we actually opened.
+  - goto:
+      screen: toy_detail
+      index: 2
+  - assert_event:
+      name: toy_opened
+      count: 1
+      params:
+        toy_id: building-blocks
+
+  # And the toy we did not open is not in there under a different id.
+  - assert_no_event:
+      name: toy_opened
+      params:
+        toy_id: rubber-duck
+
+  # Coming back is an arrival too, and it is worth exactly one event as well.
+  - tap_id: toy_detail_back_button
+  - assert_breadcrumb: "Toys"
+  - assert_event:
+      name: toy_list_shown
+      count: 1
+
+  # The count is what makes this a real test: opening the same toy again must not merge into the
+  # first event, and must not fire twice either.
+  - goto:
+      screen: toy_detail
+      index: 2
+  - assert_event:
+      name: toy_opened
+      count: 2
+      params:
+        toy_id: building-blocks
+
+  # Leave the app where we found it, so the next flow of the suite starts from the list.
+  - goto: toys

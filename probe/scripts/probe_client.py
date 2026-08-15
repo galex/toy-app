@@ -69,6 +69,14 @@ class ProbeClient:
         """Every screen of the app, its ids and its exits, as the app itself declares them."""
         return self._json("GET", "/nav_map")
 
+    def analytics_events(self) -> dict:
+        """Every analytics event the app fired since the last clear, in order."""
+        return self._json("GET", "/analytics_events")
+
+    def clear_analytics_events(self) -> dict:
+        """Start from a known state: launching the app already fired a few events."""
+        return self._json("POST", "/analytics_events/clear")
+
     def logs(self) -> dict:
         return self._json("GET", "/logs")
 

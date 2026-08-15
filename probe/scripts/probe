@@ -48,6 +48,8 @@ def main(argv=None) -> int:
     owner = sub.add_parser("owner-of", help="which screen owns this automation id")
     owner.add_argument("id")
     sub.add_parser("logs", help="the last log lines the app emitted")
+    sub.add_parser("analytics-events", help="every analytics event fired since the last clear")
+    sub.add_parser("clear-events", help="empty the analytics buffer, to start from a known state")
     sub.add_parser("press-back", help="press the platform back button")
 
     shot = sub.add_parser("screenshot", help="capture a PNG of the current screen")
@@ -100,6 +102,10 @@ def main(argv=None) -> int:
             _out(client.swipe(args.start_x, args.start_y, args.end_x, args.end_y, args.duration_ms))
         elif args.command == "input-text":
             _out(client.input_text(args.text))
+        elif args.command == "analytics-events":
+            _out(client.analytics_events())
+        elif args.command == "clear-events":
+            _out(client.clear_analytics_events())
         elif args.command == "nav-map":
             _out(client.nav_map())
         elif args.command == "goto":

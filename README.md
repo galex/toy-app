@@ -11,7 +11,7 @@ app/              two Compose screens and a six-item list of toys
 automation-ids/   Modifier.automationId, so every element has a stable, unique id
 probe-server/     a debug-only HTTP server inside the app, reading Compose's semantics tree
 probe/scripts/    the CLI an agent drives, and the YAML flow runner (standard-library Python 3)
-probe/flows/      open the list, open a toy, come back, with and without the navigation map
+probe/flows/      open a toy (with and without the map), and one asserting analytics events
 ```
 
 > The app also declares every screen, its ids and its exits in Kotlin, the probe serves them on
@@ -122,6 +122,53 @@ and the flow still passes.
 `.claude/skills/app-navigation/SKILL.md` is what makes an agent reach for all of this without being
 asked. It lives in a skill rather than in `CLAUDE.md` because `CLAUDE.md` is loaded on every turn,
 including the many that never touch the UI.
+
+## Testing the analytics nobody tests
+
+Analytics events are the least tested code most apps ship. They leave for a vendor SDK and nothing
+ever asserts on them, so a duplicated event survives for months and only shows up as a dashboard
+that looks a little too good.
+
+The app fires events through an `Analytics` interface, and in the debug build that interface is
+wrapped by `recordingIfDebug()`, which records every event before passing it on. The probe serves
+what it collected:
+
+```bash
+probe/scripts/probe analytics-events   # everything fired since the last clear
+probe/scripts/probe clear-events       # start from a known state
+```
+
+A flow then asserts on them, and the count is **exact**, because "at least one" is the assertion
+that sails straight past a double fire:
+
+```yaml
+- clear_events
+- goto:
+    screen: toy_detail
+    index: 2
+- assert_event:
+    name: toy_opened
+    count: 1
+    params:
+      toy_id: building-blocks
+```
+
+Here is `probe/flows/analytics.yaml` catching a deliberate duplicate, wired the way duplicates
+really happen, one person tracking the tap while another tracks the arrival:
+
+```
+  FAIL [3] assert_event 'toy_opened' with {'toy_id': 'building-blocks'}: expected count 1, got 2
+         [0] toy_opened {'toy_id': 'building-blocks'}
+         [1] toy_opened {'toy_id': 'building-blocks'}
+       captured failure screenshot: probe-artifacts/opening_a_toy_fires_exactly_one_event-failure.png
+```
+
+`assert_event` waits for the number of matching events to stop moving before it compares. Reading
+the count the instant it first reaches 1 would report a pass on the way to 2, which is exactly the
+bug the step exists to catch.
+
+Like the probe itself, none of this can ship: `AnalyticsRecorder` lives in the debug-only module,
+and `recordingIfDebug()` has a twin in `src/release` that hands the vendor SDK straight back.
 
 ## How it works
 

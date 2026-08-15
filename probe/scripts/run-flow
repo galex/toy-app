@@ -165,6 +165,59 @@ def _id_arg(arg) -> tuple[str, float]:
     return str(arg), ASSERT_TIMEOUT_S
 
 
+# An event count is only meaningful once the app has stopped firing. We wait for the number to hold
+# still across this many consecutive reads rather than sleeping a fixed amount, for the same reason
+# every assertion here polls: a sleep long enough today is a flake on a slower machine tomorrow.
+EVENT_SETTLE_POLLS = 3
+
+
+def _event_arg(arg) -> tuple[str, int, dict]:
+    """assert_event takes a bare name, or {name: ..., count: 1, params: {...}}.
+
+    The count is EXACT, and defaults to 1. "At least one" is the assertion that would sail straight
+    past a double fire, which is the bug worth writing this step for.
+    """
+    if isinstance(arg, dict):
+        params = arg.get("params") or {}
+        return (
+            str(arg["name"]),
+            int(arg.get("count", 1)),
+            {str(k): str(v) for k, v in params.items()},
+        )
+    return str(arg), 1, {}
+
+
+def _matching_events(client: ProbeClient, name: str, params: dict) -> list:
+    events = client.analytics_events().get("events", [])
+    return [
+        e for e in events
+        if e.get("name") == name
+        and all(str((e.get("params") or {}).get(k)) == v for k, v in params.items())
+    ]
+
+
+def _settled_events(client: ProbeClient, name: str, params: dict) -> list:
+    """The matching events, once their number has stopped moving.
+
+    Reading the count the instant it first reaches what we expect would report a pass on the way to
+    a duplicate, so we wait for it to hold still instead.
+    """
+    deadline = time.monotonic() + ASSERT_TIMEOUT_S
+    found, stable = _matching_events(client, name, params), 0
+    while stable < EVENT_SETTLE_POLLS and time.monotonic() < deadline:
+        time.sleep(ASSERT_POLL_S)
+        again = _matching_events(client, name, params)
+        stable = stable + 1 if len(again) == len(found) else 0
+        found = again
+    return found
+
+
+def _describe(events: list) -> str:
+    return "\n".join(
+        f"         [{i}] {e.get('name')} {e.get('params') or {}}" for i, e in enumerate(events)
+    )
+
+
 def _goto_arg(arg) -> tuple[str, dict]:
     """A goto step takes either a bare screen id, or {screen: ..., index: 2, ...}.
 
@@ -325,6 +378,32 @@ def run_step(client: ProbeClient, step, artifacts: str, idx: int) -> str:
         return (
             f"goto {target!r} -> {arrival['hops']} hop(s), at {arrival['breadcrumb']!r}"
         )
+
+    if name == "clear_events":
+        before = len(client.analytics_events().get("events", []))
+        client.clear_analytics_events()
+        return f"clear_events -> dropped {before} event(s)"
+
+    if name == "assert_event":
+        want_name, want_count, want_params = _event_arg(arg)
+        found = _settled_events(client, want_name, want_params)
+        if len(found) != want_count:
+            detail = f" with {want_params}" if want_params else ""
+            raise AssertionError(
+                f"assert_event {want_name!r}{detail}: expected count {want_count}, "
+                f"got {len(found)}\n{_describe(found)}".rstrip()
+            )
+        return f"assert_event {want_name!r} x{want_count} ok"
+
+    if name == "assert_no_event":
+        want_name, _count, want_params = _event_arg(arg)
+        found = _settled_events(client, want_name, want_params)
+        if found:
+            raise AssertionError(
+                f"assert_no_event {want_name!r}: fired {len(found)} time(s)\n"
+                f"{_describe(found)}"
+            )
+        return f"assert_no_event {want_name!r} ok"
 
     if name == "assert_breadcrumb":
         def check():

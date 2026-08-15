@@ -97,6 +97,15 @@ fun Routing.registerProbeRoutes(context: ToolContext) {
         }
     }
 
+    get("/analytics_events") {
+        call.respondJson(AnalyticsRecorder.snapshot().toJson())
+    }
+
+    post("/analytics_events/clear") {
+        AnalyticsRecorder.clear()
+        call.respondOk()
+    }
+
     get("/screenshot") {
         runCatching { context.driver.screenshot() }.fold(
             onSuccess = { call.respondBytes(it, ContentType.Image.PNG) },
