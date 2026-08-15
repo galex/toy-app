@@ -18,6 +18,9 @@ as true as the code. Ask for it BEFORE anything else.
 ## Rules
 
 - Never tap a coordinate that did not come from a snapshot taken seconds ago.
+- When you change the navigation, update `AppNavigationMap` in the same edit. A new screen gets a
+  `Screen`, a new way out of a screen gets an `Action`, a screen you removed leaves the map. The
+  map describes the navigation as it is now, never as it was.
 - Never write a hard-coded route into a flow. Use `goto`, so the flow survives a screen being
   inserted in the middle of the path.
 - A screen you just added is not done until it has a `Screen` entry in `AppNavigationMap`, with its
